@@ -1,3 +1,4 @@
+# app.py
 import os
 import time
 import math
@@ -5,34 +6,55 @@ import requests
 import pandas as pd
 import streamlit as st
 
-import os, streamlit as st
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) Config de página (DEBE ser el primer comando de Streamlit y solo una vez)
+# ──────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Tennis Arbitrage (The Odds API)", layout="wide")
 
-API_KEY = st.secrets.get("THE_ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
+# ──────────────────────────────────────────────────────────────────────────────
+# 2) Carga robusta de API key (Cloud → secrets, local → env var o archivo TOML)
+# ──────────────────────────────────────────────────────────────────────────────
+def load_api_key():
+    # 1) Streamlit Cloud / local: st.secrets
+    try:
+        key = st.secrets.get("THE_ODDS_API_KEY")
+        if key:
+            return key
+    except Exception:
+        pass
+    # 2) Variable de entorno
+    key = os.getenv("THE_ODDS_API_KEY")
+    if key:
+        return key
+    # 3) Leer .streamlit/secrets.toml manualmente (útil en local)
+    try:
+        # Python 3.11+: tomllib
+        import tomllib  # si usas <3.11, instala 'toml' y ajusta este bloque
+        with open(".streamlit/secrets.toml", "rb") as f:
+            data = tomllib.load(f)
+            key = data.get("THE_ODDS_API_KEY")
+            if key:
+                return key
+    except Exception:
+        pass
+    return None
 
+API_KEY = load_api_key()
+BASE_URL = "https://api.the-odds-api.com/v4"
+DEFAULT_SPORT = "tennis_atp"  # Cambia en la UI si lo deseas
+
+# Diagnóstico útil
 st.caption(f"📁 CWD: {os.getcwd()}")
 st.caption(f"🔎 Existe .streamlit/secrets.toml? {os.path.exists('.streamlit/secrets.toml')}")
 st.caption(f"🔐 API key cargada? {'sí' if bool(API_KEY) else 'no'}")
 
 if not API_KEY:
-    st.error("Falta THE_ODDS_API_KEY. Añádela en .streamlit/secrets.toml o como variable de entorno.")
+    st.error("Falta THE_ODDS_API_KEY. En Cloud: Settings→Secrets. En local: .streamlit/secrets.toml o variable de entorno.")
     st.stop()
 
-# -----------------------------
-# Config inicial
-# -----------------------------
-st.set_page_config(page_title="Tennis Arbitrage (The Odds API)", layout="wide")
-
-API_KEY = st.secrets.get("THE_ODDS_API_KEY", os.getenv("THE_ODDS_API_KEY", ""))
-BASE_URL = "https://api.the-odds-api.com/v4"
-DEFAULT_SPORT = "tennis_atp"  # Puedes cambiar por tennis, atp, wta, etc. Ver /v4/sports
-
-if not API_KEY:
-    st.error("Falta THE_ODDS_API_KEY en .streamlit/secrets.toml")
-    st.stop()
-
-# -----------------------------
-# Sidebar (controles)
-# -----------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) Sidebar (controles)
+# ──────────────────────────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Configuración")
 regions = st.sidebar.multiselect(
     "Regiones (bookmakers)",
@@ -40,7 +62,7 @@ regions = st.sidebar.multiselect(
     default=["uk", "eu"],
     help="Filtra casas por región. The Odds API segmenta por regiones."
 )
-markets = ["h2h"]  # Para tenis, trabajaremos con H2H (dos resultados)
+markets = ["h2h"]  # Tenis: trabajamos con H2H (dos resultados)
 odds_format = "decimal"
 
 sport_key = st.sidebar.text_input(
@@ -72,21 +94,21 @@ ttl_seconds = st.sidebar.slider(
     help="Cuánto tiempo cachéar los datos para evitar consumir cuota."
 )
 
-auto_refresh = st.sidebar.checkbox("Autorefresh (cada 30s)", value=False)
-
-# -----------------------------
-# Utils
-# -----------------------------
-@st.cache_data(ttl=lambda: ttl_seconds)
-def fetch_odds(sport_key, regions, markets, odds_format="decimal"):
+# ──────────────────────────────────────────────────────────────────────────────
+# 4) Utils
+#    - Cacheamos por argumentos y con un 'cache_buster' que cambia cada TTL.
+# ──────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def fetch_odds(sport_key, regions, markets, odds_format, api_key, cache_buster):
     """
     Llama /v4/sports/{sport}/odds y devuelve JSON crudo + headers útiles.
+    cache_buster: usa int(time.time() // ttl_seconds) para invalidar cache.
     """
     params = {
         "regions": ",".join(regions) if regions else "uk,eu",
         "markets": ",".join(markets),
         "oddsFormat": odds_format,
-        "apiKey": API_KEY
+        "apiKey": api_key
     }
     url = f"{BASE_URL}/sports/{sport_key}/odds"
     r = requests.get(url, params=params, timeout=30)
@@ -100,11 +122,9 @@ def fetch_odds(sport_key, regions, markets, odds_format="decimal"):
 
 def best_two_outcome_arbs(event_bookmakers, require_diff_books=True):
     """
-    Dado el bloque de 'bookmakers' de un evento, busca arbitraje H2H.
+    Busca arbitraje H2H en el bloque 'bookmakers' de un evento.
     Devuelve lista de dicts con oportunidades.
     """
-    # Estructura: bookmakers: [{key/name, markets: [{key: "h2h", outcomes: [{name,price}, ...]}]}]
-    # Extraemos (bookmaker, jugador1, odd1, jugador2, odd2)
     rows = []
     for bk in event_bookmakers:
         name = bk.get("title") or bk.get("key")
@@ -114,7 +134,6 @@ def best_two_outcome_arbs(event_bookmakers, require_diff_books=True):
             outs = m.get("outcomes", [])
             if len(outs) != 2:
                 continue
-            # Normalizamos orden outcomes
             o1, o2 = outs[0], outs[1]
             rows.append({
                 "bookmaker": name,
@@ -124,7 +143,6 @@ def best_two_outcome_arbs(event_bookmakers, require_diff_books=True):
                 "outcome2_price": float(o2.get("price")) if o2.get("price") is not None else None,
             })
 
-    # Recorremos todos los pares de casas (A para outcome1, B para outcome2)
     arbs = []
     for i in range(len(rows)):
         for j in range(len(rows)):
@@ -146,7 +164,6 @@ def best_two_outcome_arbs(event_bookmakers, require_diff_books=True):
                     "odd2": b["outcome2_price"],
                     "edge": edge
                 })
-    # Ordenamos por mayor edge
     arbs.sort(key=lambda d: d["edge"], reverse=True)
     return arbs
 
@@ -159,14 +176,10 @@ def stake_split(odd1, odd2, bankroll):
     profit = bankroll * edge
     return s1, s2, edge, profit
 
-# -----------------------------
-# Main
-# -----------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 5) Main
+# ──────────────────────────────────────────────────────────────────────────────
 st.title("🎾 Tennis Arbitrage Finder — The Odds API")
-
-if auto_refresh:
-    st.experimental_rerun  # no-op marker for clarity
-    st.autorefresh(interval=30_000, key="ar")
 
 with st.expander("ℹ️ Cómo funciona"):
     st.markdown("""
@@ -176,10 +189,19 @@ with st.expander("ℹ️ Cómo funciona"):
 - Puedes **filtrar por regiones** y **fijar el margen mínimo** que te interesa.
     """)
 
-# Fetch
+# Llamada con "cache_buster" basado en el TTL del sidebar
+cache_buster = int(time.time() // ttl_seconds)
+
 with st.spinner("Descargando cuotas…"):
     try:
-        data, headers = fetch_odds(sport_key, regions, markets, odds_format)
+        data, headers = fetch_odds(
+            sport_key=sport_key,
+            regions=regions,
+            markets=markets,
+            odds_format=odds_format,
+            api_key=API_KEY,
+            cache_buster=cache_buster
+        )
     except requests.HTTPError as e:
         st.error(f"Error HTTP {e.response.status_code}: {e.response.text}")
         st.stop()
@@ -205,8 +227,7 @@ for ev in events:
 
     bks = ev.get("bookmakers", [])
     arbs = best_two_outcome_arbs(bks, require_diff_books=require_diff_books)
-    # Filtra por edge mínimo
-    arbs = [a for a in arbs if (a["edge"]*100) >= min_edge]
+    arbs = [a for a in arbs if (a["edge"] * 100) >= min_edge]
 
     for a in arbs:
         s1, s2, edge, profit = stake_split(a["odd1"], a["odd2"], bankroll)
@@ -220,7 +241,7 @@ for ev in events:
             "bk_outcome2": a["bk_outcome2"],
             "outcome2": a["outcome2"],
             "odd2": a["odd2"],
-            "edge_%": round(edge*100, 3),
+            "edge_%": round(edge * 100, 3),
             "stake1": round(s1, 2),
             "stake2": round(s2, 2),
             "profit_€": round(profit, 2)
