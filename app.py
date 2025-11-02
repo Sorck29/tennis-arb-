@@ -8,7 +8,7 @@ import streamlit as st
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) Config de página (debe ser el primer st.* y solo una vez)
 # ──────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Tennis Arbitrage (The Odds API)", layout="wide")
+st.set_page_config(page_title="Arbitrage Finder — The Odds API", layout="wide")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2) Carga robusta de API key
@@ -35,6 +35,7 @@ def load_api_key():
 API_KEY = load_api_key()
 BASE_URL = "https://api.the-odds-api.com/v4"
 
+# Diagnóstico útil
 st.caption(f"📁 CWD: {os.getcwd()}")
 st.caption(f"🔎 Existe .streamlit/secrets.toml? {os.path.exists('.streamlit/secrets.toml')}")
 st.caption(f"🔐 API key cargada? {'sí' if bool(API_KEY) else 'no'}")
@@ -44,9 +45,10 @@ if not API_KEY:
     st.stop()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) Sidebar
+# 3) Sidebar: configuración + selector de deporte con buscador
 # ──────────────────────────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Configuración")
+
 regions = st.sidebar.multiselect(
     "Regiones (bookmakers)",
     options=["uk", "eu", "us", "au"],
@@ -54,13 +56,13 @@ regions = st.sidebar.multiselect(
     help="Filtra casas por región (afecta qué casas devuelve la API)."
 )
 
-min_edge = st.sidebar.slider(
-    "Margen mínimo de arbitraje (%)",
-    min_value=0.1, max_value=10.0, value=1.0, step=0.1
-)
+min_edge = st.sidebar.slider("Margen mínimo de arbitraje (%)", 0.1, 10.0, 1.0, 0.1)
 bankroll = st.sidebar.number_input("Bankroll para cálculo de stakes (€)", min_value=10.0, value=100.0, step=10.0)
 require_diff_books = st.sidebar.checkbox("Exigir casas distintas para cada lado", value=True)
-ttl_seconds = st.sidebar.slider("Cache TTL (segundos)", min_value=10, max_value=600, value=60, step=10)
+ttl_seconds = st.sidebar.slider("Cache TTL (segundos)", 10, 600, 60, 10)
+only_two_outcome_sports = st.sidebar.checkbox("Mostrar solo deportes H2H de 2 resultados", value=True, help="Recomendado para esta versión de arbitraje.")
+
+sport_search = st.sidebar.text_input("Buscar deporte/torneo", value="", help="Filtra por texto en título o clave (ej. 'tennis', 'nba', 'mlb', 'wta').")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4) Fetch helpers
@@ -98,7 +100,7 @@ def best_two_outcome_arbs(event_bookmakers, require_diff_books=True):
                 continue
             outs = m.get("outcomes", [])
             if len(outs) != 2:
-                continue
+                continue  # ignoramos mercados con 3 resultados (ej. fútbol 1X2)
             o1, o2 = outs[0], outs[1]
             rows.append({
                 "bookmaker": name,
@@ -107,6 +109,7 @@ def best_two_outcome_arbs(event_bookmakers, require_diff_books=True):
                 "outcome2_name": o2.get("name"),
                 "outcome2_price": float(o2.get("price")) if o2.get("price") is not None else None,
             })
+
     arbs = []
     for i in range(len(rows)):
         for j in range(len(rows)):
@@ -142,29 +145,42 @@ def stake_split(odd1, odd2, bankroll):
 # ──────────────────────────────────────────────────────────────────────────────
 # 5) UI principal
 # ──────────────────────────────────────────────────────────────────────────────
-st.title("🎾 Tennis Arbitrage Finder — The Odds API")
+st.title("🔎 Arbitrage Finder — The Odds API (H2H 2-way)")
 
-with st.spinner("Cargando lista de ligas de tenis…"):
+with st.spinner("Cargando lista de deportes/torneos…"):
     cache_buster_sports = int(time.time() // (ttl_seconds or 60))
     all_sports = fetch_sports(API_KEY, cache_buster_sports)
-    tennis_sports = [s for s in all_sports if "tennis" in (s.get("key","").lower()) or "tennis" in (s.get("title","").lower())]
 
-if not tennis_sports:
-    st.error("No se encontraron ligas de tenis en The Odds API para tu clave/región.")
+# Filtrado por texto
+def match_text(s, q):
+    q = q.strip().lower()
+    if not q:
+        return True
+    return q in (s.get("title","").lower()) or q in (s.get("key","").lower())
+
+sports_filtered = [s for s in all_sports if match_text(s, sport_search)]
+
+# (Opcional) lista de deportes con h2h de 2 resultados (heurística simple por nombre)
+two_way_hint_keywords = ["tennis", "basket", "nba", "ufc", "mma", "boxing", "nhl", "mlb", "nfl", "table_tennis", "volleyball", "darts"]
+if only_two_outcome_sports:
+    sports_filtered = [s for s in sports_filtered if any(k in (s.get("key","").lower()) for k in two_way_hint_keywords)]
+
+if not sports_filtered:
+    st.warning("No se encontraron deportes con el filtro actual. Borra el texto de búsqueda o desmarca 'solo 2 resultados'.")
     st.stop()
 
-# Select de ligas de tenis (muestra el título legible, usa la key internamente)
-sport_titles = [s.get("title") or s.get("key") for s in tennis_sports]
-sport_keys   = [s.get("key") for s in tennis_sports]
-default_idx = 0
-selected_title = st.selectbox("Liga / torneo de tenis", sport_titles, index=default_idx, help="Elige una competencia concreta (ATP/WTA/Challenger/ITF).")
+sport_titles = [s.get("title") or s.get("key") for s in sports_filtered]
+sport_keys   = [s.get("key") for s in sports_filtered]
+selected_idx = 0
+selected_title = st.sidebar.selectbox("Deporte / Torneo", sport_titles, index=selected_idx)
 sport_key = sport_keys[sport_titles.index(selected_title)]
 
 with st.expander("ℹ️ Cómo funciona"):
     st.markdown("""
-- Descargamos **cuotas H2H** (moneyline) de la **liga/torneo de tenis** elegida.
+- Descargamos **cuotas H2H** (moneyline) del **deporte/torneo** elegido.
 - Probamos todas las combinaciones de **dos casas** y verificamos si `1/odd_A + 1/odd_B < 1`.
 - Mostramos margen, stakes óptimos y beneficio para tu bankroll.
+> Nota: esta versión solo busca arbitrajes en **mercados H2H de 2 resultados**.
     """)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -195,7 +211,7 @@ for ev in events:
     commence = ev.get("commence_time")
     home = (ev.get("home_team") or "").strip()
     away = (ev.get("away_team") or "").strip()
-    title = f"{home} vs {away}" if home and away else (ev.get("sport_title") or "Tennis")
+    title = f"{home} vs {away}" if home and away else (ev.get("sport_title") or selected_title)
 
     bks = ev.get("bookmakers", [])
     arbs = best_two_outcome_arbs(bks, require_diff_books=require_diff_books)
@@ -222,9 +238,9 @@ for ev in events:
 # Resultados
 st.subheader("💡 Oportunidades de arbitraje")
 if not all_rows:
-    st.info("No se encontraron arbitrajes con el umbral seleccionado en esta liga. Prueba con otra liga o baja el umbral.")
+    st.info("No se encontraron arbitrajes H2H de 2 resultados con el umbral seleccionado. Prueba otro deporte/torneo, cambia regiones o baja el umbral.")
 else:
     df = pd.DataFrame(all_rows).sort_values(by="edge_%", ascending=False)
     st.dataframe(df, use_container_width=True)
     csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Descargar CSV", data=csv, file_name="tennis_arbs.csv", mime="text/csv")
+    st.download_button("Descargar CSV", data=csv, file_name="arbs.csv", mime="text/csv")
