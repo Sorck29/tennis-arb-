@@ -5,6 +5,18 @@ import requests
 import pandas as pd
 import streamlit as st
 
+import os, streamlit as st
+
+API_KEY = st.secrets.get("THE_ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
+
+st.caption(f"📁 CWD: {os.getcwd()}")
+st.caption(f"🔎 Existe .streamlit/secrets.toml? {os.path.exists('.streamlit/secrets.toml')}")
+st.caption(f"🔐 API key cargada? {'sí' if bool(API_KEY) else 'no'}")
+
+if not API_KEY:
+    st.error("Falta THE_ODDS_API_KEY. Añádela en .streamlit/secrets.toml o como variable de entorno.")
+    st.stop()
+
 # -----------------------------
 # Config inicial
 # -----------------------------
